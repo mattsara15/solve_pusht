@@ -13,10 +13,13 @@ class Critic(nn.Module):
 
         self.cnn = nn.Conv2d(pix_shape[0], 32, kernel_size=3, stride=2)
         self.fc1 = nn.Linear(70688, 256)
+        self.fc2 = nn.Linear(256, self._action_dim)
 
     def forward(
         self, pixels: torch.Tensor, agent_pos: torch.Tensor, action: torch.Tensor
     ):
         y = nn.functional.relu(self.cnn(pixels))
         y = y.flatten(start_dim=1)
-        return self.fc1(y)
+        y = nn.functional.relu(self.fc1(y))
+        q_value = self.fc2(y)
+        return q_value

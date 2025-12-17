@@ -111,8 +111,8 @@ class ParallelReplayBuffer:
             torch.stack(pixels),
             torch.stack(agent_pos),
             torch.stack(actions),
-            torch.stack(rewards),
-            torch.stack(dones),
+            torch.stack(rewards).unsqueeze(-1),
+            torch.stack(dones).unsqueeze(-1),
             torch.stack(next_pixels),
             torch.stack(next_agent_pos),
         )
