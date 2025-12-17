@@ -66,7 +66,7 @@ def evaluate_policy(
             )
             agent_pos = (
                 torch.from_numpy(state_dict["agent_pos"]).to(torch.float32).to(device)
-            )
+            ).unsqueeze(0)
 
             # perform action
             actions = agent.select_action(observation, agent_pos)
@@ -104,9 +104,10 @@ def main(args):
     # Background evaluation thread handle (avoid overlapping eval runs)
     eval_thread: threading.Thread | None = None
 
-    def _run_eval_async(step_idx: int):
+    def _run_eval_async(step_idx: int, agent_to_eval: SAC):
         """Run policy evaluation in a background thread and log results."""
-        eval_results = evaluate_policy(num_episodes=10, device=device, agent=agent)
+        agent_to_eval_copy = agent_to_eval.clone()
+        eval_results = evaluate_policy(num_episodes=10, device=device, agent=agent_to_eval_copy)
         for key, value in eval_results.items():
             writer.add_scalar(f"eval/{key}", value, global_step=step_idx)
         print(
@@ -213,7 +214,7 @@ def main(args):
             # Prevent overlapping evaluations if the previous one hasn't finished
             if eval_thread is None or not eval_thread.is_alive():
                 eval_thread = threading.Thread(
-                    target=_run_eval_async, args=(step,), daemon=True
+                    target=_run_eval_async, args=(step, agent), daemon=True
                 )
                 eval_thread.start()
             else:
