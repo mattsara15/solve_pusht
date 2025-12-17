@@ -106,9 +106,79 @@ class SAC:
         log_prob = log_prob.sum(1, keepdim=True)
         return action, log_prob
 
+    def soft_update_target_networks(self):
+        for target_param, param in zip(
+            self._critic_1_target.parameters(), self._critic_1.parameters()
+        ):
+            target_param.data.copy_(
+                self._cfg.tau * param.data + (1 - self._cfg.tau) * target_param.data
+            )
+
+        for target_param, param in zip(
+            self._critic_2_target.parameters(), self._critic_2.parameters()
+        ):
+            target_param.data.copy_(
+                self._cfg.tau * param.data + (1 - self._cfg.tau) * target_param.data
+            )
+
     def update(
         self, pixels, agent_pos, actions, rewards, dones, next_pixels, next_agent_pos
     ):
-        
+        with torch.no_grad():
+            next_actions, next_log_pi = self.act(next_pixels, next_agent_pos)
+            Q_1_next = self._critic_1_target(next_pixels, next_agent_pos, next_actions)
+            Q_2_next = self._critic_2_target(next_pixels, next_agent_pos, next_actions)
+            Q_min_next = torch.min(Q_1_next, Q_2_next)
 
-        return {"q1_loss": 0.0, "q2_loss": 0.0, "actor_loss": 0.0}
+            # TODO: use alpha decay
+            y = rewards + self._cfg.gamma * (1 - dones) * (
+                Q_min_next - self._cfg.alpha * next_log_pi
+            )
+        
+        new_actions, log_pi = self.act(pixels, agent_pos)
+        Q_1 = self._critic_1(pixels, agent_pos, new_actions)
+        Q_2 = self._critic_2(pixels, agent_pos, new_actions)
+        Q_min = torch.min(Q_1, Q_2)
+        actor_loss = (self._cfg.alpha * log_pi - Q_min).mean()
+
+        # Update Actor
+        self._actor_optimizer.zero_grad()
+        actor_loss.backward()
+        actor_grad_norm = torch.nn.utils.clip_grad_norm_(
+            self._actor.parameters(), max_norm=10.0
+        )
+        self._actor_optimizer.step()
+
+        # Update Critic 1
+        critic_1_loss = torch.nn.functional.mse_loss(
+            self._critic_1(pixels, agent_pos, actions), y
+        )
+        self._critic_1_optimizer.zero_grad()
+        critic_1_loss.backward()
+        critic_1_grad_norm = torch.nn.utils.clip_grad_norm_(
+            self._critic_1.parameters(), max_norm=10.0
+        )
+        self._critic_1_optimizer.step()
+
+        # Update Critic 2
+        critic_2_loss = torch.nn.functional.mse_loss(
+            self._critic_2(pixels, agent_pos, actions), y
+        )
+        self._critic_2_optimizer.zero_grad()
+        critic_2_loss.backward()
+        critic_2_grad_norm = torch.nn.utils.clip_grad_norm_(
+            self._critic_2.parameters(), max_norm=10.0
+        )
+        self._critic_2_optimizer.step()
+
+        # Soft update target networks
+        self.soft_update_target_networks()
+
+        return {
+            "q1_loss": critic_1_loss.item(),
+            "q2_loss": critic_2_loss.item(),
+            "q1_grad_norm": critic_1_grad_norm,
+            "q2_grad_norm": critic_2_grad_norm,
+            "actor_grad_norm": actor_grad_norm,
+            "actor_loss": actor_loss.item(),
+        }

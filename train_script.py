@@ -181,9 +181,9 @@ def main(args):
             exp = (
                 [observation[wid], agent_pos[wid]],
                 actions[wid],
-                torch.tensor(rewards[wid]),
+                torch.tensor(rewards[wid]).to(torch.float32).to(device),
                 [next_observation[wid], next_agent_pos[wid]],
-                torch.tensor(bool(terms[wid] or truncs[wid])),
+                torch.tensor(bool(terms[wid] or truncs[wid])).to(torch.float32).to(device),
             )
             replay_buffer.add(worker_id=wid % args.num_workers, experience=exp)
 
