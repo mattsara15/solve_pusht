@@ -18,8 +18,25 @@ from utils import ParallelReplayBuffer
 from agents.sac.sac import SAC
 
 
+def prepare_pixels_for_agent(
+    image: np.ndarray, device: torch.device, unsqueeze: bool
+) -> torch.Tensor:
+    tensor_val = torch.from_numpy(image)
+    if unsqueeze:
+        tensor_val = tensor_val.unsqueeze(0)
+    y = tensor_val.permute(0, 3, 1, 2).to(torch.float32).to(device) / 255.0
+    mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
+    y = (y - mean) / std
+    return y
+
+
 def evaluate_policy(
-    num_episodes: int, device: torch.device, agent: SAC, max_steps=500, step_idx: int = 0
+    num_episodes: int,
+    device: torch.device,
+    agent: SAC,
+    max_steps=500,
+    step_idx: int = 0,
 ) -> float:
     """Run evaluation rollouts with the current policy and return average reward."""
     # Create a single-environment vectorized eval env for consistency with training observation format
@@ -31,9 +48,9 @@ def evaluate_policy(
     )
     eval_env = RecordVideo(
         eval_env,
-        video_folder="videos",    
-        name_prefix="eval",               
-        episode_trigger=lambda x: True
+        video_folder="videos",
+        name_prefix="eval",
+        episode_trigger=lambda x: True,
     )
     eval_env = RecordEpisodeStatistics(eval_env, buffer_length=num_episodes)
     returns = []
@@ -44,12 +61,8 @@ def evaluate_policy(
         ep_ret = 0.0
         ep_steps = 0
         while not done:
-            observation = (
-                torch.from_numpy(state_dict["pixels"])
-                .to(device)
-                .unsqueeze(0)
-                .permute(0, 3, 1, 2)
-                .to(device)
+            observation = prepare_pixels_for_agent(
+                state_dict["pixels"], device, unsqueeze=True
             )
             agent_pos = (
                 torch.from_numpy(state_dict["agent_pos"]).to(torch.float32).to(device)
@@ -97,7 +110,7 @@ def main(args):
         for key, value in eval_results.items():
             writer.add_scalar(f"eval/{key}", value, global_step=step_idx)
         print(
-            f"eval (async) at step={step_idx+1}: avg_return={eval_results['average_return']:.3f}"
+            f"eval at step={step_idx+1}: avg_return={eval_results['average_return']:.3f}"
         )
 
     # Action bounds
@@ -105,8 +118,8 @@ def main(args):
     MAX_ACT = env.single_action_space.high
 
     pix_shape = env.single_observation_space["pixels"].shape  # (H,W,C)
-    st_shape = env.single_observation_space["agent_pos"].shape  # (D,)
-    obs_dim = int(np.prod(pix_shape) + np.prod(st_shape))
+    pix_shape = (pix_shape[2], pix_shape[0], pix_shape[1])  # (C,H,W)
+    st_shape = env.single_observation_space["agent_pos"].shape
     act_dim = int(np.prod(env.single_action_space.shape))
 
     device = (
@@ -132,7 +145,7 @@ def main(args):
         print(f"[info] Added: {added} expert transitions")
 
     agent = SAC(
-        obs_dim=obs_dim,
+        pix_dim=pix_shape,
         state_dim=st_shape[0],
         action_dim=act_dim,
         action_range=(MIN_ACT, MAX_ACT),
@@ -142,20 +155,21 @@ def main(args):
     state_dict, _ = env.reset()
     for step in tqdm(range(args.iterations)):
         # Prepare state
-        observation = (
-            torch.from_numpy(state_dict["pixels"]).to(device).permute(0, 3, 1, 2)
+        observation = prepare_pixels_for_agent(
+            state_dict["pixels"], device, unsqueeze=False
         )
         agent_pos = (
             torch.from_numpy(state_dict["agent_pos"]).to(torch.float32).to(device)
         )
 
         # Sample actions
-        actions = agent.act(observation, agent_pos)
+        actions = agent.select_action(observation, agent_pos)
 
         # Env step
-        next_obs, rewards, terms, truncs, _ = env.step(actions.detach().cpu().numpy())
-        next_observation = (
-            torch.from_numpy(next_obs["pixels"]).to(device).permute(0, 3, 1, 2)
+        action_np = actions.detach().cpu().numpy()
+        next_obs, rewards, terms, truncs, _ = env.step(action_np)
+        next_observation = prepare_pixels_for_agent(
+            next_obs["pixels"], device, unsqueeze=False
         )
         next_agent_pos = (
             torch.from_numpy(next_obs["agent_pos"]).to(torch.float32).to(device)
@@ -167,9 +181,9 @@ def main(args):
             exp = (
                 [observation[wid], agent_pos[wid]],
                 actions[wid],
-                rewards[wid],
+                torch.tensor(rewards[wid]),
                 [next_observation[wid], next_agent_pos[wid]],
-                bool(terms[wid] or truncs[wid]),
+                torch.tensor(bool(terms[wid] or truncs[wid])),
             )
             replay_buffer.add(worker_id=wid % args.num_workers, experience=exp)
 
@@ -184,7 +198,12 @@ def main(args):
         # Learn
         if len(replay_buffer) >= args.train_start:
             batch = replay_buffer.sample(args.batch_size)
-            results = agent.update(batch)
+            pixels, agent_pos, actions, rewards, dones, next_pixels, next_agent_pos = (
+                batch
+            )
+            results = agent.update(
+                pixels, agent_pos, actions, rewards, dones, next_pixels, next_agent_pos
+            )
             # Log training losses
             for key, value in results.items():
                 writer.add_scalar(f"train/{key}", value, global_step=step)
