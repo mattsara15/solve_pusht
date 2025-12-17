@@ -8,7 +8,6 @@ from datasets import load_dataset  # type: ignore
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-
 class ParallelReplayBuffer:
     def __init__(self, capacity: int, num_workers: int, device: torch.device):
         self.capacity: int = capacity

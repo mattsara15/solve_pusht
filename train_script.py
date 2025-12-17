@@ -69,7 +69,7 @@ def evaluate_policy(
             )
 
             # perform action
-            actions = agent.act(observation, agent_pos)
+            actions = agent.select_action(observation, agent_pos)
             next_obs, reward, terminated, truncated, _ = eval_env.step(
                 actions.detach().cpu().numpy()[0]
             )
@@ -254,7 +254,7 @@ if __name__ == "__main__":
         "--eval_freq",
         "-e",
         type=int,
-        default=10000,
+        default=2000,
         help="Evaluation frequency in training steps",
     )
     parser.add_argument(

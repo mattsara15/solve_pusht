@@ -99,7 +99,6 @@ class SAC:
         action = (action_prescaling * self._action_scale_factor) + 1
 
         log_prob = normal.log_prob(sample)
-        # is this correct?!?
         log_prob -= torch.log(
             self._action_scale_factor * (1 - action_prescaling.pow(2)) + 1e-6
         )
