@@ -14,10 +14,13 @@ class ReplayBuffer:
         capacity: int,
         device: torch.device,
         expert_buffer: Optional["ReplayBuffer"] = None,
+        pin_to_device: bool = False,
     ):
         self.capacity: int = capacity
+        self.pin_to_device = pin_to_device
         # NOTE: We keep experiences on CPU to avoid unbounded GPU memory growth.
         # Only sampled batches are moved to `self.device`.
+        # If pin_to_device is True, we move them to GPU immediately.
         self.buffer: List[Any] = []
         self.size: int = 0
         self.device: torch.device = device
@@ -28,6 +31,9 @@ class ReplayBuffer:
         # Kept separate from online replay; `sample()` can mix from it.
         self.expert_buffer: Optional["ReplayBuffer"] = expert_buffer
 
+    def _move_to_device(self, data: Any) -> Any:
+        return data.to(self.device)
+
     def set_expert_buffer(self, expert_buffer: Optional["ReplayBuffer"]) -> None:
         self.expert_buffer = expert_buffer
 
@@ -37,6 +43,9 @@ class ReplayBuffer:
 
         Thread-safe: guarded by an internal lock.
         """
+        if self.pin_to_device:
+            experience = self._move_to_device(experience)
+
         # Store experiences on CPU to prevent GPU memory growth with buffer size.
         with self._lock:
             if len(self.buffer) < self.capacity:

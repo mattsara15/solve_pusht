@@ -146,7 +146,9 @@ def main(args):
     device = torch.device("cuda")
 
     # Standalone expert buffer + online replay buffer
-    expert_buffer = ExpertReplayBuffer(capacity=300_000, device=device)
+    expert_buffer = ExpertReplayBuffer(
+        capacity=300_000, device=device, pin_to_device=args.pin_expert
+    )
     replay_buffer = ReplayBuffer(
         capacity=300_000, device=device, expert_buffer=expert_buffer
     )
@@ -273,7 +275,7 @@ if __name__ == "__main__":
         "--batch_size",
         "-b",
         type=int,
-        default=256,
+        default=64,
         help="Batch size for learning updates",
     )
     parser.add_argument(
@@ -308,6 +310,11 @@ if __name__ == "__main__":
         "-D",
         action="store_true",
         help="If set, add expert demonstrations to the replay buffer before training",
+    )
+    parser.add_argument(
+        "--pin_expert",
+        action="store_true",
+        help="If set, pin expert demonstrations to the GPU from the start",
     )
     parser.add_argument(
         "--percent_expert",
