@@ -254,36 +254,6 @@ class SAC:
 
         return {**critic_stats, **actor_stats}
 
-    def clone(self):
-        """Creates a deep copy of the SAC agent."""
-        import copy
-        
-        # Create a new SAC instance with the same configuration
-        cloned_sac = SAC(
-            pix_dim=self._pix_dim,
-            state_dim=self._state_dim,
-            action_dim=self._action_dim,
-            action_range=(self._action_low, self._action_high),
-            device=self._device,
-            cfg=copy.deepcopy(self._cfg),
-        )
-        
-        # Copy actor network
-        cloned_sac._actor.load_state_dict(copy.deepcopy(self._actor.state_dict()))
-        
-        # Copy critic networks
-        cloned_sac._critic_1.load_state_dict(copy.deepcopy(self._critic_1.state_dict()))
-        cloned_sac._critic_1_target.load_state_dict(copy.deepcopy(self._critic_1_target.state_dict()))
-        cloned_sac._critic_2.load_state_dict(copy.deepcopy(self._critic_2.state_dict()))
-        cloned_sac._critic_2_target.load_state_dict(copy.deepcopy(self._critic_2_target.state_dict()))
-        
-        # Copy optimizer states
-        cloned_sac._actor_optimizer.load_state_dict(copy.deepcopy(self._actor_optimizer.state_dict()))
-        cloned_sac._critic_1_optimizer.load_state_dict(copy.deepcopy(self._critic_1_optimizer.state_dict()))
-        cloned_sac._critic_2_optimizer.load_state_dict(copy.deepcopy(self._critic_2_optimizer.state_dict()))
-        
-        return cloned_sac
-
     def state_dict(self, include_optimizers: bool = True) -> Dict[str, Any]:
         cfg_state = {
             "critic_lr": float(getattr(self._cfg, "critic_lr")),

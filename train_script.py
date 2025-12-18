@@ -104,10 +104,21 @@ def main(args):
     # Background evaluation thread handle (avoid overlapping eval runs)
     eval_thread: threading.Thread | None = None
 
-    def _run_eval_async(step_idx: int, agent_to_eval: SAC):
+    def _run_eval_async(step_idx: int, checkpoint_path: str):
         """Run policy evaluation in a background thread and log results."""
-        agent_to_eval_copy = agent_to_eval.clone()
-        eval_results = evaluate_policy(num_episodes=10, device=device, agent=agent_to_eval_copy, step_idx=step_idx)
+        # Create a new agent instance for evaluation and load from checkpoint
+        eval_agent = SAC(
+            pix_dim=pix_shape,
+            state_dim=st_shape[0],
+            action_dim=act_dim,
+            action_range=(MIN_ACT, MAX_ACT),
+            device=device,
+        )
+        eval_agent.load(checkpoint_path)
+
+        eval_results = evaluate_policy(
+            num_episodes=10, device=device, agent=eval_agent, step_idx=step_idx
+        )
         for key, value in eval_results.items():
             writer.add_scalar(f"eval/{key}", value, global_step=step_idx)
         print(
@@ -127,16 +138,13 @@ def main(args):
 
     # Standalone expert buffer + online replay buffer
     expert_buffer = ExpertReplayBuffer(capacity=300_000, device=device)
-    replay_buffer = ReplayBuffer(capacity=300_000, device=device, expert_buffer=expert_buffer)
+    replay_buffer = ReplayBuffer(
+        capacity=300_000, device=device, expert_buffer=expert_buffer
+    )
 
     # Optionally preload expert demonstrations into expert buffer
     if args.use_demos:
-        print(
-            "[info] use_demos enabled: downloading and preloading expert transitions..."
-        )
-        added = expert_buffer.preload_expert_transitions(
-            dataset_id=args.demo_dataset
-        )
+        added = expert_buffer.preload_expert_transitions(dataset_id=args.demo_dataset)
         print(f"[info] Added: {added} expert transitions")
 
     agent = SAC(
@@ -163,36 +171,6 @@ def main(args):
         # Env step
         action_np = actions.detach().cpu().numpy()
         next_obs, rewards, terms, truncs, info = env.step(action_np)
-        '''
-        rewards[info['n_contacts'] > 0] += 0.1
-        next_observation = prepare_pixels_for_agent(
-            next_obs["pixels"], device, unsqueeze=False
-        )
-        '''
-        current_block_pose = info["block_pose"]
-        goal_pose = info["goal_pose"]
-
-        # Reward shaping: encourage the block to be close to the goal.
-        # Exponential form gives a dense signal early, but saturates near the goal.
-        base_rewards = np.asarray(rewards)
-        block_xy = np.asarray(current_block_pose)[..., :2]
-        goal_xy = np.asarray(goal_pose)[..., :2]
-        dist_to_goal = np.linalg.norm(block_xy - goal_xy, axis=-1)
-        # Calibrated exponential shaping: choose a max bonus near the goal, then
-        # set sigma so the bonus is ~0.05 when distance is ~50.
-        max_bonus = 0.20
-        target_distance = 50.0
-        target_bonus = 0.05
-        sigma = -target_distance / np.log(target_bonus / max_bonus)
-        dist_reward = max_bonus * np.exp(-dist_to_goal / sigma)
-        rewards = base_rewards + dist_reward
-
-        # TensorBoard: introspect shaping signal
-        writer.add_scalar("train/dist_to_goal_mean", float(np.mean(dist_to_goal)), step)
-        writer.add_scalar("train/dist_reward_mean", float(np.mean(dist_reward)), step)
-        writer.add_scalar("train/base_reward_mean", float(np.mean(base_rewards)), step)
-        writer.add_scalar("train/total_reward_mean", float(np.mean(rewards)), step)
-        
 
         next_observation = prepare_pixels_for_agent(
             next_obs["pixels"], device, unsqueeze=False
@@ -207,7 +185,9 @@ def main(args):
                 actions[wid].to("cpu"),
                 torch.tensor(rewards[wid]).to(torch.float32).to("cpu"),
                 [next_observation[wid].to("cpu"), next_agent_pos[wid].to("cpu")],
-                torch.tensor(bool(terms[wid] or truncs[wid])).to(torch.float32).to("cpu"),
+                torch.tensor(bool(terms[wid] or truncs[wid]))
+                .to(torch.float32)
+                .to("cpu"),
             )
             replay_buffer.add(experience=exp)
 
@@ -229,11 +209,23 @@ def main(args):
                 )
                 if not batch:
                     continue
-                pixels, agent_pos, actions, rewards, dones, next_pixels, next_agent_pos = (
-                    batch
-                )
+                (
+                    pixels,
+                    agent_pos,
+                    actions,
+                    rewards,
+                    dones,
+                    next_pixels,
+                    next_agent_pos,
+                ) = batch
                 results = agent.update(
-                    pixels, agent_pos, actions, rewards, dones, next_pixels, next_agent_pos
+                    pixels,
+                    agent_pos,
+                    actions,
+                    rewards,
+                    dones,
+                    next_pixels,
+                    next_agent_pos,
                 )
                 # Log training losses
                 for key, value in results.items():
@@ -245,20 +237,14 @@ def main(args):
 
         # Periodic evaluation (launch in a background thread)
         if (step + 1) % args.eval_freq == 0:
-            # Prevent overlapping evaluations if the previous one hasn't finished
-            if eval_thread is None or not eval_thread.is_alive():
-                eval_thread = threading.Thread(
-                    target=_run_eval_async, args=(step, agent), daemon=True
-                )
-                eval_thread.start()
-            else:
-                # Skip this tick's eval to avoid piling up threads
-                print(
-                    f"[warn] skipping eval at step {step+1} due to previous eval still running"
-                )
-
             # save the checkpoint
-            agent.save(f"checkpoints/sac_checkpoint_{step+1}.pt")
+            checkpoint_path = f"checkpoints/sac_checkpoint_{step+1}.pt"
+            agent.save(checkpoint_path)
+
+            eval_thread = threading.Thread(
+                target=_run_eval_async, args=(step, checkpoint_path), daemon=True
+            )
+            eval_thread.start()
 
     env.close()
     writer.close()
