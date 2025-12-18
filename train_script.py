@@ -107,7 +107,7 @@ def main(args):
     def _run_eval_async(step_idx: int, agent_to_eval: SAC):
         """Run policy evaluation in a background thread and log results."""
         agent_to_eval_copy = agent_to_eval.clone()
-        eval_results = evaluate_policy(num_episodes=10, device=device, agent=agent_to_eval_copy)
+        eval_results = evaluate_policy(num_episodes=10, device=device, agent=agent_to_eval_copy, step_idx=step_idx)
         for key, value in eval_results.items():
             writer.add_scalar(f"eval/{key}", value, global_step=step_idx)
         print(
