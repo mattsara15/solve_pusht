@@ -16,6 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 from utils import ExpertReplayBuffer, ReplayBuffer
 
 from agents.sac.sac import SAC
+from agents.awac.awac import AWAC
 
 
 def prepare_pixels_for_agent(
@@ -87,6 +88,14 @@ def evaluate_policy(
 
 
 def main(args):
+    # Select agent class
+    if args.agent == "sac":
+        agent_cls = SAC
+    elif args.agent == "awac":
+        agent_cls = AWAC
+    else:
+        raise ValueError(f"Unknown agent: {args.agent}")
+
     # Create parallel envs
     env = gym.make_vec(
         "gym_pusht/PushT-v0",
@@ -107,7 +116,7 @@ def main(args):
     def _run_eval_async(step_idx: int, checkpoint_path: str):
         """Run policy evaluation in a background thread and log results."""
         # Create a new agent instance for evaluation and load from checkpoint
-        eval_agent = SAC(
+        eval_agent = agent_cls(
             pix_dim=pix_shape,
             state_dim=st_shape[0],
             action_dim=act_dim,
@@ -147,7 +156,7 @@ def main(args):
         added = expert_buffer.preload_expert_transitions(dataset_id=args.demo_dataset)
         print(f"[info] Added: {added} expert transitions")
 
-    agent = SAC(
+    agent = agent_cls(
         pix_dim=pix_shape,
         state_dim=st_shape[0],
         action_dim=act_dim,
@@ -238,7 +247,7 @@ def main(args):
         # Periodic evaluation (launch in a background thread)
         if (step + 1) % args.eval_freq == 0:
             # save the checkpoint
-            checkpoint_path = f"checkpoints/sac_checkpoint_{step+1}.pt"
+            checkpoint_path = f"checkpoints/{args.agent}_checkpoint_{step+1}.pt"
             agent.save(checkpoint_path)
 
             eval_thread = threading.Thread(
@@ -318,6 +327,13 @@ if __name__ == "__main__":
         type=str,
         default="",
         help="Run name for logging and checkpointing",
+    )
+    parser.add_argument(
+        "--agent",
+        type=str,
+        default="sac",
+        choices=["sac", "awac"],
+        help="Agent to use for training (sac or awac)",
     )
     args = parser.parse_args()
 
