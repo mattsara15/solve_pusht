@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from utils import ParallelReplayBuffer
+from utils import ExpertReplayBuffer, ReplayBuffer
 
 from agents.sac.sac import SAC
 
@@ -98,7 +98,7 @@ def main(args):
 
     # TensorBoard writer
     writer = SummaryWriter(
-        log_dir=f"tensorboard/rl_finetune/{time.strftime('%d-%m-%Y_%H-%M-%S')}"
+        log_dir=f"tensorboard/{time.strftime('%d-%m-%Y_%H-%M-%S')}"
     )
 
     # Background evaluation thread handle (avoid overlapping eval runs)
@@ -125,19 +125,17 @@ def main(args):
 
     device = torch.device("cuda")
 
-    # Replay buffer across workers
-    replay_buffer = ParallelReplayBuffer(
-        capacity=300_000, num_workers=args.num_workers, device=device
-    )
-    # Optionally preload expert demonstrations into replay buffer
+    # Standalone expert buffer + online replay buffer
+    expert_buffer = ExpertReplayBuffer(capacity=300_000, device=device)
+    replay_buffer = ReplayBuffer(capacity=300_000, device=device, expert_buffer=expert_buffer)
+
+    # Optionally preload expert demonstrations into expert buffer
     if args.use_demos:
         print(
             "[info] use_demos enabled: downloading and preloading expert transitions..."
         )
-        added = replay_buffer.preload_expert_transitions(
-            dataset_id=args.demo_dataset,
-            limit=args.demo_limit,
-            target_worker=0,
+        added = expert_buffer.preload_expert_transitions(
+            dataset_id=args.demo_dataset
         )
         print(f"[info] Added: {added} expert transitions")
 
@@ -168,21 +166,19 @@ def main(args):
         next_observation = prepare_pixels_for_agent(
             next_obs["pixels"], device, unsqueeze=False
         )
-        next_agent_pos = (
-            torch.from_numpy(next_obs["agent_pos"]).to(torch.float32).to(device)
-        )
+        next_agent_pos = torch.from_numpy(next_obs["agent_pos"]).to(torch.float32)
 
         # Store transitions by worker/env id
         for wid in range(args.num_workers):
             # Flatten dict observations for critics and replay buffer
             exp = (
-                [observation[wid], agent_pos[wid]],
-                actions[wid],
-                torch.tensor(rewards[wid]).to(torch.float32).to(device),
-                [next_observation[wid], next_agent_pos[wid]],
-                torch.tensor(bool(terms[wid] or truncs[wid])).to(torch.float32).to(device),
+                [observation[wid].to("cpu"), agent_pos[wid].to("cpu")],
+                actions[wid].to("cpu"),
+                torch.tensor(rewards[wid]).to(torch.float32).to("cpu"),
+                [next_observation[wid].to("cpu"), next_agent_pos[wid].to("cpu")],
+                torch.tensor(bool(terms[wid] or truncs[wid])).to(torch.float32).to("cpu"),
             )
-            replay_buffer.add(worker_id=wid % args.num_workers, experience=exp)
+            replay_buffer.add(experience=exp)
 
         # advance observation
         state_dict = next_obs
@@ -194,7 +190,12 @@ def main(args):
 
         # Learn
         if len(replay_buffer) >= args.train_start:
-            batch = replay_buffer.sample(args.batch_size, args.offline_only_iterations, step)
+            batch = replay_buffer.sample(
+                batch_size=args.batch_size,
+                percent_expert=args.percent_expert,
+            )
+            if not batch:
+                continue
             pixels, agent_pos, actions, rewards, dones, next_pixels, next_agent_pos = (
                 batch
             )
@@ -236,12 +237,6 @@ if __name__ == "__main__":
         help="Total number of training iterations (steps)",
     )
     parser.add_argument(
-        "--offline_only_iterations",
-        type=int,
-        default=0,
-        help="The number of offline only iterations to perform before starting online training",
-    )
-    parser.add_argument(
         "--batch_size",
         "-b",
         type=int,
@@ -276,16 +271,16 @@ if __name__ == "__main__":
         help="If set, add expert demonstrations to the replay buffer before training",
     )
     parser.add_argument(
+        "--percent_expert",
+        type=float,
+        default=0.0,
+        help="Percent (0-100) or fraction (0-1) of each batch sampled from expert demonstrations",
+    )
+    parser.add_argument(
         "--demo_dataset",
         type=str,
         default="lerobot/pusht_image",
         help="Hugging Face dataset ID for expert transitions",
-    )
-    parser.add_argument(
-        "--demo_limit",
-        type=int,
-        default=None,
-        help="Optional limit on number of expert transitions to preload",
     )
     args = parser.parse_args()
 
