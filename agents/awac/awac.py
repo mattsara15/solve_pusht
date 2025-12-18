@@ -32,9 +32,18 @@ class AWAC(SAC):
             cfg=cfg,
         )
 
+    def act_old_obs(self, pixels, agent_pos, actions):
+        mean, log_std = self._actor(pixels, agent_pos)
+        std = log_std.exp()
+        normal = torch.distributions.Normal(mean, std, validate_args=False)
+        
+        logp_pi = normal.log_prob(actions).sum(axis=-1)
+        logp_pi = logp_pi - (2*(np.log(2) - actions - torch.nn.functional.softplus(-2*actions))).sum(axis=1)
+        return logp_pi
+
     def update_actor(self, pixels, agent_pos, actions):
         with self._autocast():
-            pred_actions, log_prob = self.act(pixels, agent_pos)
+            pred_actions, _ = self.act(pixels, agent_pos)
             with torch.no_grad():
                 Q1_pi = self._critic_1(pixels, agent_pos, pred_actions)
                 Q2_pi = self._critic_2(pixels, agent_pos, pred_actions)
@@ -48,7 +57,8 @@ class AWAC(SAC):
             beta = self._cfg.beta
             adv_pi = V_old_actions - V_pi
             weights = F.softmax(adv_pi / beta, dim=0)
-            actor_loss = (-log_prob * len(weights) * weights.detach()).mean()
+            logp_pi = self.act_old_obs(pixels, agent_pos, actions)
+            actor_loss = (-logp_pi * len(weights) * weights.detach()).mean()
 
         # Update Actor
         self._actor_optimizer.zero_grad(set_to_none=True)
@@ -57,20 +67,10 @@ class AWAC(SAC):
             self._actor.parameters(), max_norm=10.0
         )
         self._actor_optimizer.step()
-        
-        # Introspect the quality of action predictions
-        predicted_actions_x = []
-        predicted_actions_y = []        
-        if self._enhanced_debug:
-            for action in pred_actions:
-                predicted_actions_x.append(action[0].item())
-                predicted_actions_y.append(action[1].item())
 
         return {
             "actor_grad_norm": actor_grad_norm,
-            "actor_loss": actor_loss.item(),
-            "predicted_action_histogram_x": np.asarray(predicted_actions_x),
-            "predicted_action_histogram_y": np.asarray(predicted_actions_y),
+            "actor_loss": actor_loss
         }
 
 

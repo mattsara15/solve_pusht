@@ -20,6 +20,9 @@ from utils import ExpertReplayBuffer, ReplayBuffer
 from agents.sac.sac import SAC
 from agents.awac.awac import AWAC
 
+@torch.compile
+def normalize_image(img):
+  return img / 255.0
 
 def prepare_pixels_for_agent(
     image: np.ndarray, device: torch.device, unsqueeze: bool
@@ -27,12 +30,12 @@ def prepare_pixels_for_agent(
     tensor_val = torch.from_numpy(image)
     if unsqueeze:
         tensor_val = tensor_val.unsqueeze(0)
-    y = tensor_val.permute(0, 3, 1, 2).to(torch.float32).to(device) / 255.0
+    y = tensor_val.permute(0, 3, 1, 2).to(torch.float32).to(device)
+    y = normalize_image(y)
     mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
     y = (y - mean) / std
     return y
-
 
 def evaluate_policy(
     num_episodes: int,
@@ -300,7 +303,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--train_start",
         type=int,
-        default=2500,
+        default=500,
         help="Number of transitions to collect before starting learning",
     )
     parser.add_argument(

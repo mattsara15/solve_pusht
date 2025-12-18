@@ -32,7 +32,11 @@ class ReplayBuffer:
         self.expert_buffer: Optional["ReplayBuffer"] = expert_buffer
 
     def _move_to_device(self, data: Any) -> Any:
-        return data.to(self.device)
+        if isinstance(data, torch.Tensor):
+            return data.to(self.device)
+        if isinstance(data, (list, tuple)):
+            return type(data)(self._move_to_device(x) for x in data)
+        return data
 
     def set_expert_buffer(self, expert_buffer: Optional["ReplayBuffer"]) -> None:
         self.expert_buffer = expert_buffer
