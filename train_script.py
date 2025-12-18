@@ -221,25 +221,28 @@ def main(args):
 
         # Learn
         if len(replay_buffer) >= args.train_start:
-            batch = replay_buffer.sample(
-                batch_size=args.batch_size,
-                percent_expert=args.percent_expert,
-            )
-            if not batch:
-                continue
-            pixels, agent_pos, actions, rewards, dones, next_pixels, next_agent_pos = (
-                batch
-            )
-            results = agent.update(
-                pixels, agent_pos, actions, rewards, dones, next_pixels, next_agent_pos
-            )
-            # Log training losses
-            for key, value in results.items():
-                if "histogram" in key:
-                    if len(value) > 0:
-                        writer.add_histogram(f"train/{key}", value, step)
-                else:
-                    writer.add_scalar(f"train/{key}", value, step)
+            # Multi-Step Training Updates
+            for _ in range(args.updates_per_step):
+                batch = replay_buffer.sample(
+                    batch_size=args.batch_size,
+                    percent_expert=args.percent_expert,
+                )
+                if not batch:
+                    continue
+                pixels, agent_pos, actions, rewards, dones, next_pixels, next_agent_pos = (
+                    batch
+                )
+                results = agent.update(
+                    pixels, agent_pos, actions, rewards, dones, next_pixels, next_agent_pos
+                )
+                # Log training losses
+                for key, value in results.items():
+                    if "histogram" in key:
+                        if len(value) > 0:
+                            writer.add_histogram(f"train/{key}", value, step)
+                    else:
+                        writer.add_scalar(f"train/{key}", value, step)
+
         # Periodic evaluation (launch in a background thread)
         if (step + 1) % args.eval_freq == 0:
             # Prevent overlapping evaluations if the previous one hasn't finished
@@ -279,6 +282,13 @@ if __name__ == "__main__":
         help="Batch size for learning updates",
     )
     parser.add_argument(
+        "--updates_per_step",
+        "-s",
+        type=int,
+        default=1,
+        help="Number of updates per step",
+    )
+    parser.add_argument(
         "--num_workers",
         "-w",
         type=int,
@@ -294,7 +304,6 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--train_start",
-        "-s",
         type=int,
         default=2500,
         help="Number of transitions to collect before starting learning",
