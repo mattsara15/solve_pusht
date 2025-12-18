@@ -15,24 +15,24 @@ class Actor(nn.Module):
 
         self._cnn_backbone = nn.Sequential(
             nn.Conv2d(pix_shape[0], 32, kernel_size=3, stride=2),
-            nn.ReLU(inplace=True),
+            nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=3, stride=2),
-            nn.ReLU(inplace=True),
+            nn.ReLU(),
             nn.Conv2d(64, 64, kernel_size=3, stride=2),
-            nn.ReLU(inplace=True),
+            nn.ReLU(),
             nn.Conv2d(64, 16, kernel_size=3, stride=2),
-            nn.ReLU(inplace=True),
+            nn.ReLU(),
         )
         self._state_proj_dim = 32
         self._state_proj = nn.Sequential(
             nn.Linear(2, self._state_proj_dim),
-            nn.ReLU(inplace=True),
+            nn.ReLU(),
         )
         self._mlp = nn.Sequential(
             nn.Linear(400 + self._state_proj_dim, 256),
-            nn.ReLU(inplace=True),
+            nn.ReLU(),
             nn.Linear(256, 256),
-            nn.ReLU(inplace=True),
+            nn.ReLU(),
         )
         self._mean_head = nn.Linear(256, action_dim)
         self._log_std_head = nn.Linear(256, action_dim)

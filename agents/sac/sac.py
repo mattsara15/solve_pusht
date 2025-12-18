@@ -4,6 +4,7 @@
 from typing import Any, Dict, List, Optional, Tuple, Union
 from pathlib import Path
 import torch
+import torch.nn as nn
 import numpy as np 
 from contextlib import nullcontext
 
@@ -16,10 +17,10 @@ class SACConfig:
     actor_lr: float = 1e-4
     gamma: float = 0.98
     tau: float = 0.005
-    alpha: float = 0.15
+    alpha: float = 0.05
 
 
-class SAC:
+class SAC(nn.Module):
     def __init__(
         self,
         pix_dim: List[int],
@@ -29,6 +30,7 @@ class SAC:
         device: torch.device,
         cfg: SACConfig = SACConfig(),
     ):
+        super(SAC, self).__init__()
         # Setup Variables
         self._pix_dim: List[int] = pix_dim
         self._state_dim: int = state_dim
@@ -75,8 +77,6 @@ class SAC:
         ).to(device)
         self._critic_1_target.load_state_dict(self._critic_1.state_dict())
         self._critic_1_target.eval()
-        for p in self._critic_1_target.parameters():
-            p.requires_grad_(False)
 
         self._critic_2 = Critic(
             pix_shape=self._pix_dim,
@@ -90,41 +90,17 @@ class SAC:
         ).to(device)
         self._critic_2_target.load_state_dict(self._critic_2.state_dict())
         self._critic_2_target.eval()
-        for p in self._critic_2_target.parameters():
-            p.requires_grad_(False)
-
+        
         # optimizers
         self._actor_optimizer = torch.optim.Adam(
-            self._actor.parameters(), lr=self._cfg.actor_lr
+            self._actor.parameters(), lr=self._cfg.actor_lr, capturable=True
         )
         self._critic_1_optimizer = torch.optim.Adam(
-            self._critic_1.parameters(), lr=self._cfg.critic_lr
+            self._critic_1.parameters(), lr=self._cfg.critic_lr, capturable=True
         )
         self._critic_2_optimizer = torch.optim.Adam(
-            self._critic_2.parameters(), lr=self._cfg.critic_lr
+            self._critic_2.parameters(), lr=self._cfg.critic_lr, capturable=True
         )
-
-        # Precompute constant used in scaled-action log-prob correction
-        # log|det(da_env/da_tanh)| = sum(log(action_scale))
-        self._log_action_scale_sum = torch.log(self._action_scale).sum()
-
-        # Try enabling fused Adam on CUDA for speed (best-effort)
-        if self._device.type == "cuda":
-            for opt in (self._actor_optimizer, self._critic_1_optimizer, self._critic_2_optimizer):
-                try:
-                    # Re-create optimizer with fused=True if supported by this torch build
-                    params = [p for group in opt.param_groups for p in group["params"]]
-                    lr = opt.param_groups[0].get("lr", 1e-3)
-                    new_opt = torch.optim.Adam(params, lr=lr, fused=True)
-                    new_opt.load_state_dict(opt.state_dict())
-                    if opt is self._actor_optimizer:
-                        self._actor_optimizer = new_opt
-                    elif opt is self._critic_1_optimizer:
-                        self._critic_1_optimizer = new_opt
-                    else:
-                        self._critic_2_optimizer = new_opt
-                except Exception:
-                    pass
 
     @torch.no_grad
     def select_action(self, observation: torch.Tensor, agent_pos: torch.Tensor):
@@ -133,19 +109,18 @@ class SAC:
     def act(self, observation: torch.Tensor, agent_pos: torch.Tensor):
         mean, log_std = self._actor(observation, agent_pos)
         std = log_std.exp()
-        normal = torch.distributions.Normal(mean, std)
+        normal = torch.distributions.Normal(mean, std, validate_args=False)
         sample = normal.rsample()
-        action_tanh = torch.tanh(sample)
 
         # Scale to environment bounds
+        action_tanh = torch.tanh(sample)
         action = action_tanh * self._action_scale + self._action_bias
 
         # Log-prob of the *scaled* action.
         # First compute log-prob after tanh squashing (standard SAC correction), then apply
         # the constant Jacobian correction for the affine scaling to env bounds.
-        log_prob = normal.log_prob(sample) - torch.log(1 - action_tanh.pow(2) + 1e-6)
+        log_prob = normal.log_prob(sample) - torch.log(self._action_scale * (1 - action_tanh.pow(2)) + 1e-6)
         log_prob = log_prob.sum(dim=1, keepdim=True)
-        log_prob = log_prob - self._log_action_scale_sum
         return action, log_prob
 
     def _autocast(self):
@@ -188,7 +163,7 @@ class SAC:
 
         # Update Critic 1
         self._critic_1_optimizer.zero_grad(set_to_none=True)
-        critic_1_loss.backward()
+        critic_1_loss.backward(retain_graph=True)
         critic_1_grad_norm = torch.nn.utils.clip_grad_norm_(
             self._critic_1.parameters(), max_norm=10.0
         )
@@ -196,7 +171,7 @@ class SAC:
 
         # Update Critic 2
         self._critic_2_optimizer.zero_grad(set_to_none=True)
-        critic_2_loss.backward()
+        critic_2_loss.backward(retain_graph=True)
         critic_2_grad_norm = torch.nn.utils.clip_grad_norm_(
             self._critic_2.parameters(), max_norm=10.0
         )
@@ -206,9 +181,9 @@ class SAC:
         self.soft_update_target_networks()
 
         return {
-            "q1_loss": critic_1_loss.item(),
-            "q2_loss": critic_2_loss.item(),
-            "combined_q_loss" : (critic_1_loss + critic_2_loss).item(),
+            "q1_loss": critic_1_loss,
+            "q2_loss": critic_2_loss,
+            "combined_q_loss": critic_1_loss + critic_2_loss,
             "q1_grad_norm": critic_1_grad_norm,
             "q2_grad_norm": critic_2_grad_norm,
         }
@@ -224,7 +199,7 @@ class SAC:
     
         # Update Actor
         self._actor_optimizer.zero_grad(set_to_none=True)
-        actor_loss.backward()
+        actor_loss.backward(retain_graph=True)
         actor_grad_norm = torch.nn.utils.clip_grad_norm_(
             self._actor.parameters(), max_norm=10.0
         )
@@ -240,7 +215,8 @@ class SAC:
 
         return {
             "actor_grad_norm": actor_grad_norm,
-            "actor_loss": actor_loss.item(),
+            "actor_loss": actor_loss,
+            "avg_q_value": Q_min.mean(),
             "predicted_action_histogram_x": np.asarray(predicted_actions_x),
             "predicted_action_histogram_y": np.asarray(predicted_actions_y),
         }

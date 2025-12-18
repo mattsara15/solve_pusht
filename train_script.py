@@ -10,8 +10,10 @@ from gymnasium.wrappers import RecordEpisodeStatistics, RecordVideo
 import gym_pusht  # Important: This registers the namespace
 
 import numpy as np
+
 import torch
 from torch.utils.tensorboard import SummaryWriter
+from tensordict.nn import CudaGraphModule
 
 from utils import ExpertReplayBuffer, ReplayBuffer
 
@@ -166,6 +168,12 @@ def main(args):
         device=device,
     )
 
+    # Compile the agent update for faster execution
+    if args.compile:
+        update_fn = CudaGraphModule(agent.update)
+    else:
+        update_fn = agent.update
+
     state_dict, _ = env.reset()
     for step in tqdm(range(args.iterations)):
         # Prepare state
@@ -220,31 +228,21 @@ def main(args):
                 )
                 if not batch:
                     continue
-                (
-                    pixels,
-                    agent_pos,
-                    actions,
-                    rewards,
-                    dones,
-                    next_pixels,
-                    next_agent_pos,
-                ) = batch
-                results = agent.update(
-                    pixels,
-                    agent_pos,
-                    actions,
-                    rewards,
-                    dones,
-                    next_pixels,
-                    next_agent_pos,
+                pixels, agent_pos, actions, rewards, dones, next_pixels, next_agent_pos = (
+                    batch
                 )
-                # Log training losses
+                results = update_fn(
+                    pixels, agent_pos, actions, rewards, dones, next_pixels, next_agent_pos
+                )
+                # Log training losses (convert tensors to scalars)
                 for key, value in results.items():
                     if "histogram" in key:
                         if len(value) > 0:
                             writer.add_histogram(f"train/{key}", value, step)
                     else:
-                        writer.add_scalar(f"train/{key}", value, step)
+                        # Convert tensor to scalar for logging
+                        scalar_value = value.item() if torch.is_tensor(value) else value
+                        writer.add_scalar(f"train/{key}", scalar_value, step)
 
         # Periodic evaluation (launch in a background thread)
         if (step + 1) % args.eval_freq == 0:
@@ -275,7 +273,7 @@ if __name__ == "__main__":
         "--batch_size",
         "-b",
         type=int,
-        default=64,
+        default=256,
         help="Batch size for learning updates",
     )
     parser.add_argument(
@@ -315,6 +313,11 @@ if __name__ == "__main__":
         "--pin_expert",
         action="store_true",
         help="If set, pin expert demonstrations to the GPU from the start",
+    )
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="If set, compile the agent model for faster execution",
     )
     parser.add_argument(
         "--percent_expert",
