@@ -15,24 +15,24 @@ class Actor(nn.Module):
 
         self._cnn_backbone = nn.Sequential(
             nn.Conv2d(pix_shape[0], 32, kernel_size=3, stride=2),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Conv2d(32, 64, kernel_size=3, stride=2),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Conv2d(64, 64, kernel_size=3, stride=2),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Conv2d(64, 16, kernel_size=3, stride=2),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
         )
         self._state_proj_dim = 32
         self._state_proj = nn.Sequential(
             nn.Linear(2, self._state_proj_dim),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
         )
         self._mlp = nn.Sequential(
             nn.Linear(400 + self._state_proj_dim, 256),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Linear(256, 256),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
         )
         self._mean_head = nn.Linear(256, action_dim)
         self._log_std_head = nn.Linear(256, action_dim)
@@ -43,7 +43,7 @@ class Actor(nn.Module):
 
     def forward(self, pixels: torch.Tensor, agent_pos: torch.Tensor):
         z = self._cnn_backbone(pixels)
-        z_flat = z.flatten(start_dim=1)
+        z_flat = torch.flatten(z, start_dim=1)
         state_proj = self._state_proj(agent_pos)
         feats = torch.cat([z_flat, state_proj], dim=1)
         

@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from pathlib import Path
 import torch
 import numpy as np 
+from contextlib import nullcontext
 
 from agents.sac.actor import Actor
 from agents.sac.critic import Critic
@@ -44,6 +45,13 @@ class SAC:
         self._device: torch.device = device
         self._enhanced_debug = False
 
+        # AMP config (favor bf16 when supported; fall back to fp16)
+        self._use_amp: bool = self._device.type == "cuda"
+        if self._use_amp and hasattr(torch.cuda, "is_bf16_supported"):
+            self._amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        else:
+            self._amp_dtype = torch.bfloat16
+
         # Hyper-parameters
         self._cfg: SACConfig = cfg
 
@@ -66,7 +74,9 @@ class SAC:
             action_dim=self._action_dim,
         ).to(device)
         self._critic_1_target.load_state_dict(self._critic_1.state_dict())
-        self._critic_1.eval()
+        self._critic_1_target.eval()
+        for p in self._critic_1_target.parameters():
+            p.requires_grad_(False)
 
         self._critic_2 = Critic(
             pix_shape=self._pix_dim,
@@ -79,7 +89,9 @@ class SAC:
             action_dim=self._action_dim,
         ).to(device)
         self._critic_2_target.load_state_dict(self._critic_2.state_dict())
-        self._critic_2.eval()
+        self._critic_2_target.eval()
+        for p in self._critic_2_target.parameters():
+            p.requires_grad_(False)
 
         # optimizers
         self._actor_optimizer = torch.optim.Adam(
@@ -91,6 +103,28 @@ class SAC:
         self._critic_2_optimizer = torch.optim.Adam(
             self._critic_2.parameters(), lr=self._cfg.critic_lr
         )
+
+        # Precompute constant used in scaled-action log-prob correction
+        # log|det(da_env/da_tanh)| = sum(log(action_scale))
+        self._log_action_scale_sum = torch.log(self._action_scale).sum()
+
+        # Try enabling fused Adam on CUDA for speed (best-effort)
+        if self._device.type == "cuda":
+            for opt in (self._actor_optimizer, self._critic_1_optimizer, self._critic_2_optimizer):
+                try:
+                    # Re-create optimizer with fused=True if supported by this torch build
+                    params = [p for group in opt.param_groups for p in group["params"]]
+                    lr = opt.param_groups[0].get("lr", 1e-3)
+                    new_opt = torch.optim.Adam(params, lr=lr, fused=True)
+                    new_opt.load_state_dict(opt.state_dict())
+                    if opt is self._actor_optimizer:
+                        self._actor_optimizer = new_opt
+                    elif opt is self._critic_1_optimizer:
+                        self._critic_1_optimizer = new_opt
+                    else:
+                        self._critic_2_optimizer = new_opt
+                except Exception:
+                    pass
 
     @torch.no_grad
     def select_action(self, observation: torch.Tensor, agent_pos: torch.Tensor):
@@ -111,8 +145,13 @@ class SAC:
         # the constant Jacobian correction for the affine scaling to env bounds.
         log_prob = normal.log_prob(sample) - torch.log(1 - action_tanh.pow(2) + 1e-6)
         log_prob = log_prob.sum(dim=1, keepdim=True)
-        log_prob = log_prob - torch.log(self._action_scale).sum()
+        log_prob = log_prob - self._log_action_scale_sum
         return action, log_prob
+
+    def _autocast(self):
+        if not self._use_amp:
+            return nullcontext()
+        return torch.autocast(device_type="cuda", dtype=self._amp_dtype, enabled=True)
 
     def soft_update_target_networks(self):
         for target_param, param in zip(
@@ -130,31 +169,25 @@ class SAC:
             )
 
     def update_critic(self, pixels, agent_pos, actions, rewards, dones, next_pixels, next_agent_pos):
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-            next_action, next_log_prob = self.act(next_pixels, next_agent_pos)
-            target_Q_1_next = self._critic_1_target(next_pixels, next_agent_pos, next_action)
-            target_Q_2_next = self._critic_2_target(next_pixels, next_agent_pos, next_action)
-            target_Q_min_next = torch.min(target_Q_1_next, target_Q_2_next)
-
-            # TODO: use alpha decay
-            target_Q = rewards + self._cfg.gamma * (1 - dones) * (
-                target_Q_min_next - self._cfg.alpha * next_log_prob
-            )
-            target_Q = target_Q.detach()
+        with self._autocast():
+            # Targets do not require gradients; avoid building an autograd graph.
+            with torch.no_grad():
+                next_action, next_log_prob = self.act(next_pixels, next_agent_pos)
+                target_Q_1_next = self._critic_1_target(next_pixels, next_agent_pos, next_action)
+                target_Q_2_next = self._critic_2_target(next_pixels, next_agent_pos, next_action)
+                target_Q_min_next = torch.min(target_Q_1_next, target_Q_2_next)
+                target_Q = rewards + self._cfg.gamma * (1 - dones) * (
+                    target_Q_min_next - self._cfg.alpha * next_log_prob
+                )
 
             current_Q_1 = self._critic_1(pixels, agent_pos, actions)
             current_Q_2 = self._critic_2(pixels, agent_pos, actions)
-        
-            critic_1_loss = torch.nn.functional.mse_loss(
-                current_Q_1, target_Q
-            )
 
-            critic_2_loss = torch.nn.functional.mse_loss(
-                current_Q_2, target_Q
-            )
+            critic_1_loss = torch.nn.functional.mse_loss(current_Q_1, target_Q)
+            critic_2_loss = torch.nn.functional.mse_loss(current_Q_2, target_Q)
 
         # Update Critic 1
-        self._critic_1_optimizer.zero_grad()
+        self._critic_1_optimizer.zero_grad(set_to_none=True)
         critic_1_loss.backward()
         critic_1_grad_norm = torch.nn.utils.clip_grad_norm_(
             self._critic_1.parameters(), max_norm=10.0
@@ -162,7 +195,7 @@ class SAC:
         self._critic_1_optimizer.step()
 
         # Update Critic 2
-        self._critic_2_optimizer.zero_grad()
+        self._critic_2_optimizer.zero_grad(set_to_none=True)
         critic_2_loss.backward()
         critic_2_grad_norm = torch.nn.utils.clip_grad_norm_(
             self._critic_2.parameters(), max_norm=10.0
@@ -181,15 +214,16 @@ class SAC:
         }
 
     def update_actor(self, pixels, agent_pos):
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+        with self._autocast():
             actions, log_prob = self.act(pixels, agent_pos)
-            Q_1 = self._critic_1(pixels, agent_pos, actions)
-            Q_2 = self._critic_2(pixels, agent_pos, actions)
-            Q_min = torch.min(Q_1, Q_2)
+            with torch.no_grad():
+                Q_1 = self._critic_1(pixels, agent_pos, actions)
+                Q_2 = self._critic_2(pixels, agent_pos, actions)
+                Q_min = torch.min(Q_1, Q_2)
             actor_loss = (self._cfg.alpha * log_prob - Q_min).mean()
-
+    
         # Update Actor
-        self._actor_optimizer.zero_grad()
+        self._actor_optimizer.zero_grad(set_to_none=True)
         actor_loss.backward()
         actor_grad_norm = torch.nn.utils.clip_grad_norm_(
             self._actor.parameters(), max_norm=10.0
