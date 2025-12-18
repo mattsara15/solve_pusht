@@ -98,7 +98,7 @@ def main(args):
 
     # TensorBoard writer
     writer = SummaryWriter(
-        log_dir=f"tensorboard/{time.strftime('%d-%m-%Y_%H-%M-%S')}"
+        log_dir=f"tensorboard/{args.run_name}_{time.strftime('%d-%m-%Y_%H-%M-%S')}"
     )
 
     # Background evaluation thread handle (avoid overlapping eval runs)
@@ -316,6 +316,13 @@ if __name__ == "__main__":
         type=str,
         default="lerobot/pusht_image",
         help="Hugging Face dataset ID for expert transitions",
+    )
+    parser.add_argument(
+        "--run_name",
+        "-n",
+        type=str,
+        default="",
+        help="Run name for logging and checkpointing",
     )
     args = parser.parse_args()
 
