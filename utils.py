@@ -34,60 +34,70 @@ class ParallelReplayBuffer:
             ) % self.capacity
         self.size += 1
 
-    def sample(self, batch_size: int) -> List[Any]:
+    def sample(self, batch_size: int, offline_only_iterations: int, step: int) -> List[Any]:
         """Sample a batch across worker buffers without flattening them.
 
         This avoids creating a giant intermediate list of all experiences.
         We sample without replacement up to the number of stored experiences.
         """
-        # Collect per-buffer lengths and total
-        lengths = [len(buf) for buf in self.buffers]
-        total = sum(lengths)
+        # During offline-only warmup, sample strictly from buffer[0]
+        if step < offline_only_iterations:
+            buf0 = self.buffers[0]
+            if len(buf0) == 0:
+                return []
+            target = min(batch_size, len(buf0))
+            # Sample without replacement
+            idxs = random.sample(range(len(buf0)), k=target) if target > 0 else []
+            batch: List[Any] = [buf0[i] for i in idxs]
+        else:
+            # Collect per-buffer lengths and total
+            lengths = [len(buf) for buf in self.buffers]
+            total = sum(lengths)
 
-        if total == 0:
-            return []
+            if total == 0:
+                return []
 
-        target = min(batch_size, total)
+            target = min(batch_size, total)
 
-        # Build cumulative lengths for O(log N) buffer selection
-        # Example: lengths=[3,5,2] -> cumsum=[3,8,10]
-        cumsum = []
-        running = 0
-        for L in lengths:
-            running += L
-            cumsum.append(running)
+            # Build cumulative lengths for O(log N) buffer selection
+            # Example: lengths=[3,5,2] -> cumsum=[3,8,10]
+            cumsum = []
+            running = 0
+            for L in lengths:
+                running += L
+                cumsum.append(running)
 
-        batch: List[Any] = []
-        seen: set[tuple[int, int]] = set()  # (buffer_idx, local_idx)
+            batch = []
+            seen: set[tuple[int, int]] = set()  # (buffer_idx, local_idx)
 
-        # Helper to pick a (buffer_idx, local_idx) pair by global index
-        def pick_by_global_index(gidx: int) -> tuple[int, int]:
-            # Binary search over cumsum to find buffer
-            lo, hi = 0, len(cumsum) - 1
-            while lo < hi:
-                mid = (lo + hi) // 2
-                if gidx < cumsum[mid]:
-                    hi = mid
-                else:
-                    lo = mid + 1
-            buf_idx = lo
-            prev = cumsum[buf_idx - 1] if buf_idx > 0 else 0
-            local_idx = gidx - prev
-            return buf_idx, local_idx
+            # Helper to pick a (buffer_idx, local_idx) pair by global index
+            def pick_by_global_index(gidx: int) -> tuple[int, int]:
+                # Binary search over cumsum to find buffer
+                lo, hi = 0, len(cumsum) - 1
+                while lo < hi:
+                    mid = (lo + hi) // 2
+                    if gidx < cumsum[mid]:
+                        hi = mid
+                    else:
+                        lo = mid + 1
+                buf_idx = lo
+                prev = cumsum[buf_idx - 1] if buf_idx > 0 else 0
+                local_idx = gidx - prev
+                return buf_idx, local_idx
 
-        # Sample without replacement by tracking selected (buffer, index)
-        # If duplicates occur, retry until we fill the batch or exceed attempts.
-        attempts = 0
-        max_attempts = target * 10  # generous cap to avoid rare infinite loops
-        while len(batch) < target and attempts < max_attempts:
-            attempts += 1
-            gidx = random.randrange(total)
-            buf_idx, local_idx = pick_by_global_index(gidx)
-            key = (buf_idx, local_idx)
-            if key in seen:
-                continue
-            seen.add(key)
-            batch.append(self.buffers[buf_idx][local_idx])
+            # Sample without replacement by tracking selected (buffer, index)
+            # If duplicates occur, retry until we fill the batch or exceed attempts.
+            attempts = 0
+            max_attempts = target * 10  # generous cap to avoid rare infinite loops
+            while len(batch) < target and attempts < max_attempts:
+                attempts += 1
+                gidx = random.randrange(total)
+                buf_idx, local_idx = pick_by_global_index(gidx)
+                key = (buf_idx, local_idx)
+                if key in seen:
+                    continue
+                seen.add(key)
+                batch.append(self.buffers[buf_idx][local_idx])
 
         # simplify output format
         pixels = []
@@ -154,17 +164,17 @@ class ParallelReplayBuffer:
                 curr_entry = frames[i][1]
                 next_entry = frames[i + 1][1]
 
-                image_t = curr_entry["observation.image"].to(self.device).unsqueeze(0)
-                state_t = curr_entry["observation.state"].to(self.device).unsqueeze(0)
-                action_t = curr_entry["action"].to(self.device).unsqueeze(0)
+                image_t = curr_entry["observation.image"].to(self.device)
+                state_t = curr_entry["observation.state"].to(self.device)
+                action_t = curr_entry["action"].to(self.device)
 
                 # Reward and done typically refer to the transition to t+1
-                reward_tp1 = curr_entry["next.reward"].to(self.device).unsqueeze(0)
-                done_tp1 = curr_entry["next.done"].to(self.device).unsqueeze(0)
+                reward_tp1 = curr_entry["next.reward"].to(self.device)
+                done_tp1 = curr_entry["next.done"].to(self.device)
 
                 # Use observation image/state from frame_index t+1 as next_observation
-                image_tp1 = next_entry["observation.image"].to(self.device).unsqueeze(0)
-                state_tp1 = next_entry["observation.state"].to(self.device).unsqueeze(0)
+                image_tp1 = next_entry["observation.image"].to(self.device)
+                state_tp1 = next_entry["observation.state"].to(self.device)
 
                 # log experience tuple
                 experience = (
@@ -172,7 +182,7 @@ class ParallelReplayBuffer:
                     action_t,
                     reward_tp1,
                     [image_tp1, state_tp1],
-                    done_tp1,
+                    done_tp1.to(torch.float32),
                 )
 
                 self.add(worker_id=target_worker, experience=experience)

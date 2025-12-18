@@ -123,11 +123,7 @@ def main(args):
     st_shape = env.single_observation_space["agent_pos"].shape
     act_dim = int(np.prod(env.single_action_space.shape))
 
-    device = (
-        torch.device("mps")
-        if torch.backends.mps.is_available()
-        else torch.device("cpu")
-    )
+    device = torch.device("cuda")
 
     # Replay buffer across workers
     replay_buffer = ParallelReplayBuffer(
@@ -198,7 +194,7 @@ def main(args):
 
         # Learn
         if len(replay_buffer) >= args.train_start:
-            batch = replay_buffer.sample(args.batch_size)
+            batch = replay_buffer.sample(args.batch_size, args.offline_only_iterations, step)
             pixels, agent_pos, actions, rewards, dones, next_pixels, next_agent_pos = (
                 batch
             )
@@ -207,8 +203,10 @@ def main(args):
             )
             # Log training losses
             for key, value in results.items():
-                writer.add_scalar(f"train/{key}", value, global_step=step)
-
+                if "histogram" in key:
+                    writer.add_histogram(f"train/{key}", value, step)
+                else:
+                    writer.add_scalar(f"train/{key}", value, step)
         # Periodic evaluation (launch in a background thread)
         if (step + 1) % args.eval_freq == 0:
             # Prevent overlapping evaluations if the previous one hasn't finished
@@ -238,10 +236,16 @@ if __name__ == "__main__":
         help="Total number of training iterations (steps)",
     )
     parser.add_argument(
+        "--offline_only_iterations",
+        type=int,
+        default=0,
+        help="The number of offline only iterations to perform before starting online training",
+    )
+    parser.add_argument(
         "--batch_size",
         "-b",
         type=int,
-        default=64,
+        default=128,
         help="Batch size for learning updates",
     )
     parser.add_argument(
