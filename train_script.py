@@ -163,6 +163,12 @@ def main(args):
         # Env step
         action_np = actions.detach().cpu().numpy()
         next_obs, rewards, terms, truncs, info = env.step(action_np)
+        '''
+        rewards[info['n_contacts'] > 0] += 0.1
+        next_observation = prepare_pixels_for_agent(
+            next_obs["pixels"], device, unsqueeze=False
+        )
+        '''
         current_block_pose = info["block_pose"]
         goal_pose = info["goal_pose"]
 
@@ -172,11 +178,13 @@ def main(args):
         block_xy = np.asarray(current_block_pose)[..., :2]
         goal_xy = np.asarray(goal_pose)[..., :2]
         dist_to_goal = np.linalg.norm(block_xy - goal_xy, axis=-1)
-        # NOTE: previous exp(-3*d) was often ~0 when d is not tiny.
-        # Using exp(-d/sigma) with a larger sigma makes the signal much less sparse.
-        sigma = 2.0
-        scale = 2.0
-        dist_reward = scale * np.exp(-dist_to_goal / sigma)
+        # Calibrated exponential shaping: choose a max bonus near the goal, then
+        # set sigma so the bonus is ~0.05 when distance is ~50.
+        max_bonus = 0.20
+        target_distance = 50.0
+        target_bonus = 0.05
+        sigma = -target_distance / np.log(target_bonus / max_bonus)
+        dist_reward = max_bonus * np.exp(-dist_to_goal / sigma)
         rewards = base_rewards + dist_reward
 
         # TensorBoard: introspect shaping signal
@@ -247,7 +255,7 @@ def main(args):
                 )
 
             # save the checkpoint
-            agent.save_checkpoint(f"checkpoints/sac_checkpoint_{step+1}.pt")
+            agent.save(f"checkpoints/sac_checkpoint_{step+1}.pt")
 
     env.close()
     writer.close()
