@@ -245,7 +245,7 @@ if __name__ == "__main__":
         "--batch_size",
         "-b",
         type=int,
-        default=128,
+        default=256,
         help="Batch size for learning updates",
     )
     parser.add_argument(

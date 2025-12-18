@@ -11,20 +11,45 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 class ParallelReplayBuffer:
     def __init__(self, capacity: int, num_workers: int, device: torch.device):
         self.capacity: int = capacity
-        self.num_workers: int = num_workers + 1  # reserve one for the replay
+        # NOTE: We keep experiences on CPU to avoid unbounded GPU memory growth.
+        # Only sampled batches are moved to `self.device`.
+        self.num_workers: int = num_workers
         self.buffers: List[List[Any]] = [[] for _ in range(num_workers)]
         self.size: int = 0
         self.device: torch.device = device
         # Per-worker write index for ring-buffer behavior when capacity is reached
-        self._write_idx: List[int] = [1 for _ in range(num_workers)]
+        self._write_idx: List[int] = [0 for _ in range(num_workers)]
+
+    def _to_cpu_leaf(self, x: Any) -> Any:
+        if torch.is_tensor(x):
+            return x.detach().to("cpu")
+        return x
+
+    def _to_cpu_experience(self, experience: Any) -> Any:
+        # Expected format:
+        # ( [pixels, agent_pos], action, reward, [next_pixels, next_agent_pos], done )
+        obs, action, reward, next_obs, done = experience
+        pixels, agent_pos = obs
+        next_pixels, next_agent_pos = next_obs
+        return (
+            [self._to_cpu_leaf(pixels), self._to_cpu_leaf(agent_pos)],
+            self._to_cpu_leaf(action),
+            self._to_cpu_leaf(reward),
+            [self._to_cpu_leaf(next_pixels), self._to_cpu_leaf(next_agent_pos)],
+            self._to_cpu_leaf(done),
+        )
 
     def add(self, worker_id: int, experience: Any) -> None:
         """Add a single experience to the buffer for a given worker.
 
         Experience can be any tuple or object; training code should know how to consume it.
         """
+        # Store experiences on CPU to prevent GPU memory from growing with buffer size.
+        experience = self._to_cpu_experience(experience)
+
         if len(self.buffers[worker_id]) < self.capacity:
             self.buffers[worker_id].append(experience)
+            self.size += 1
         else:
             # Overwrite oldest using a simple ring buffer per worker
             idx = self._write_idx[worker_id] % self.capacity
@@ -32,7 +57,6 @@ class ParallelReplayBuffer:
             self._write_idx[worker_id] = (
                 self._write_idx[worker_id] + 1
             ) % self.capacity
-        self.size += 1
 
     def sample(self, batch_size: int, offline_only_iterations: int, step: int) -> List[Any]:
         """Sample a batch across worker buffers without flattening them.
@@ -116,14 +140,15 @@ class ParallelReplayBuffer:
             next_agent_pos.append(row[3][1])
             dones.append(row[4])
             
+        # Stack on CPU then move the batch to the training device.
         return (
-            torch.stack(pixels),
-            torch.stack(agent_pos),
-            torch.stack(actions),
-            torch.stack(rewards).unsqueeze(-1),
-            torch.stack(dones).unsqueeze(-1),
-            torch.stack(next_pixels),
-            torch.stack(next_agent_pos),
+            torch.stack(pixels).to(self.device, non_blocking=True),
+            torch.stack(agent_pos).to(self.device, non_blocking=True),
+            torch.stack(actions).to(self.device, non_blocking=True),
+            torch.stack(rewards).unsqueeze(-1).to(self.device, non_blocking=True),
+            torch.stack(dones).unsqueeze(-1).to(self.device, non_blocking=True),
+            torch.stack(next_pixels).to(self.device, non_blocking=True),
+            torch.stack(next_agent_pos).to(self.device, non_blocking=True),
         )
 
     def __len__(self):
@@ -164,17 +189,18 @@ class ParallelReplayBuffer:
                 curr_entry = frames[i][1]
                 next_entry = frames[i + 1][1]
 
-                image_t = curr_entry["observation.image"].to(self.device)
-                state_t = curr_entry["observation.state"].to(self.device)
-                action_t = curr_entry["action"].to(self.device)
+                # Keep expert transitions on CPU; sampled batches move to GPU in `sample()`.
+                image_t = curr_entry["observation.image"].to("cpu")
+                state_t = curr_entry["observation.state"].to("cpu")
+                action_t = curr_entry["action"].to("cpu")
 
                 # Reward and done typically refer to the transition to t+1
-                reward_tp1 = curr_entry["next.reward"].to(self.device)
-                done_tp1 = curr_entry["next.done"].to(self.device)
+                reward_tp1 = curr_entry["next.reward"].to("cpu")
+                done_tp1 = curr_entry["next.done"].to("cpu")
 
                 # Use observation image/state from frame_index t+1 as next_observation
-                image_tp1 = next_entry["observation.image"].to(self.device)
-                state_tp1 = next_entry["observation.state"].to(self.device)
+                image_tp1 = next_entry["observation.image"].to("cpu")
+                state_tp1 = next_entry["observation.state"].to("cpu")
 
                 # log experience tuple
                 experience = (
