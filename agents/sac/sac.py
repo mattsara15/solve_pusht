@@ -1,7 +1,8 @@
 # type: ignore[all]
 
 
-from typing import List, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
+from pathlib import Path
 import torch
 import numpy as np 
 
@@ -248,3 +249,78 @@ class SAC:
         cloned_sac._critic_2_optimizer.load_state_dict(copy.deepcopy(self._critic_2_optimizer.state_dict()))
         
         return cloned_sac
+
+    def state_dict(self, include_optimizers: bool = True) -> Dict[str, Any]:
+        cfg_state = {
+            "critic_lr": float(getattr(self._cfg, "critic_lr")),
+            "actor_lr": float(getattr(self._cfg, "actor_lr")),
+            "gamma": float(getattr(self._cfg, "gamma")),
+            "tau": float(getattr(self._cfg, "tau")),
+            "alpha": float(getattr(self._cfg, "alpha")),
+        }
+
+        state: Dict[str, Any] = {
+            "meta": {
+                "pix_dim": list(self._pix_dim),
+                "state_dim": int(self._state_dim),
+                "action_dim": int(self._action_dim),
+                "action_low": self._action_low.detach().cpu(),
+                "action_high": self._action_high.detach().cpu(),
+            },
+            "cfg": cfg_state,
+            "actor": self._actor.state_dict(),
+            "critic_1": self._critic_1.state_dict(),
+            "critic_1_target": self._critic_1_target.state_dict(),
+            "critic_2": self._critic_2.state_dict(),
+            "critic_2_target": self._critic_2_target.state_dict(),
+        }
+
+        if include_optimizers:
+            state["actor_optimizer"] = self._actor_optimizer.state_dict()
+            state["critic_1_optimizer"] = self._critic_1_optimizer.state_dict()
+            state["critic_2_optimizer"] = self._critic_2_optimizer.state_dict()
+
+        return state
+
+    def load_state_dict(self, state_dict: Dict[str, Any], strict: bool = True) -> None:
+        self._actor.load_state_dict(state_dict["actor"], strict=strict)
+        self._critic_1.load_state_dict(state_dict["critic_1"], strict=strict)
+        self._critic_1_target.load_state_dict(state_dict["critic_1_target"], strict=strict)
+        self._critic_2.load_state_dict(state_dict["critic_2"], strict=strict)
+        self._critic_2_target.load_state_dict(state_dict["critic_2_target"], strict=strict)
+
+        # Optimizers are optional (e.g. when loading for evaluation only)
+        if "actor_optimizer" in state_dict:
+            self._actor_optimizer.load_state_dict(state_dict["actor_optimizer"])
+            self._move_optimizer_state_to_device(self._actor_optimizer)
+        if "critic_1_optimizer" in state_dict:
+            self._critic_1_optimizer.load_state_dict(state_dict["critic_1_optimizer"])
+            self._move_optimizer_state_to_device(self._critic_1_optimizer)
+        if "critic_2_optimizer" in state_dict:
+            self._critic_2_optimizer.load_state_dict(state_dict["critic_2_optimizer"])
+            self._move_optimizer_state_to_device(self._critic_2_optimizer)
+
+    def save(self, path: Union[str, Path], include_optimizers: bool = True) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(self.state_dict(include_optimizers=include_optimizers), path)
+
+    def load(
+        self,
+        path: Union[str, Path],
+        *,
+        map_location: Optional[Union[str, torch.device]] = None,
+        strict: bool = True,
+    ) -> Dict[str, Any]:
+        ckpt = torch.load(
+            Path(path),
+            map_location=map_location if map_location is not None else self._device,
+        )
+        self.load_state_dict(ckpt, strict=strict)
+        return ckpt
+
+    def _move_optimizer_state_to_device(self, optimizer: torch.optim.Optimizer) -> None:
+        for state in optimizer.state.values():
+            for key, value in list(state.items()):
+                if torch.is_tensor(value):
+                    state[key] = value.to(self._device)

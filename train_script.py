@@ -162,7 +162,30 @@ def main(args):
 
         # Env step
         action_np = actions.detach().cpu().numpy()
-        next_obs, rewards, terms, truncs, _ = env.step(action_np)
+        next_obs, rewards, terms, truncs, info = env.step(action_np)
+        current_block_pose = info["block_pose"]
+        goal_pose = info["goal_pose"]
+
+        # Reward shaping: encourage the block to be close to the goal.
+        # Exponential form gives a dense signal early, but saturates near the goal.
+        base_rewards = np.asarray(rewards)
+        block_xy = np.asarray(current_block_pose)[..., :2]
+        goal_xy = np.asarray(goal_pose)[..., :2]
+        dist_to_goal = np.linalg.norm(block_xy - goal_xy, axis=-1)
+        # NOTE: previous exp(-3*d) was often ~0 when d is not tiny.
+        # Using exp(-d/sigma) with a larger sigma makes the signal much less sparse.
+        sigma = 2.0
+        scale = 2.0
+        dist_reward = scale * np.exp(-dist_to_goal / sigma)
+        rewards = base_rewards + dist_reward
+
+        # TensorBoard: introspect shaping signal
+        writer.add_scalar("train/dist_to_goal_mean", float(np.mean(dist_to_goal)), step)
+        writer.add_scalar("train/dist_reward_mean", float(np.mean(dist_reward)), step)
+        writer.add_scalar("train/base_reward_mean", float(np.mean(base_rewards)), step)
+        writer.add_scalar("train/total_reward_mean", float(np.mean(rewards)), step)
+        
+
         next_observation = prepare_pixels_for_agent(
             next_obs["pixels"], device, unsqueeze=False
         )
@@ -205,7 +228,8 @@ def main(args):
             # Log training losses
             for key, value in results.items():
                 if "histogram" in key:
-                    writer.add_histogram(f"train/{key}", value, step)
+                    if len(value) > 0:
+                        writer.add_histogram(f"train/{key}", value, step)
                 else:
                     writer.add_scalar(f"train/{key}", value, step)
         # Periodic evaluation (launch in a background thread)
@@ -221,6 +245,9 @@ def main(args):
                 print(
                     f"[warn] skipping eval at step {step+1} due to previous eval still running"
                 )
+
+            # save the checkpoint
+            agent.save_checkpoint(f"checkpoints/sac_checkpoint_{step+1}.pt")
 
     env.close()
     writer.close()
