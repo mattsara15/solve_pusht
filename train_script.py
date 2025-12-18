@@ -48,7 +48,7 @@ def evaluate_policy(
     )
     eval_env = RecordVideo(
         eval_env,
-        video_folder="videos",
+        video_folder=f"videos/{step_idx}",
         name_prefix="eval",
         episode_trigger=lambda x: True,
     )

@@ -10,11 +10,11 @@ from agents.sac.critic import Critic
 
 
 class SACConfig:
-    critic_lr: float = 1e-3
+    critic_lr: float = 1e-4
     actor_lr: float = 1e-4
-    gamma: float = 0.99
+    gamma: float = 0.98
     tau: float = 0.005
-    alpha: float = 0.2
+    alpha: float = 0.15
 
 
 class SAC:
@@ -41,7 +41,7 @@ class SAC:
         self._action_bias = (self._action_high + self._action_low) / 2.0
 
         self._device: torch.device = device
-        self._enhanced_debug = True
+        self._enhanced_debug = False
 
         # Hyper-parameters
         self._cfg: SACConfig = cfg
@@ -174,6 +174,7 @@ class SAC:
         return {
             "q1_loss": critic_1_loss.item(),
             "q2_loss": critic_2_loss.item(),
+            "combined_q_loss" : (critic_1_loss + critic_2_loss).item(),
             "q1_grad_norm": critic_1_grad_norm,
             "q2_grad_norm": critic_2_grad_norm,
         }
