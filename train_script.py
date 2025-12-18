@@ -15,7 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from utils import ExpertReplayBuffer, ReplayBuffer
 
-from agents.sac.sac import SAC
+from agents.sac.sac import SAC, SACConfig
 
 
 def prepare_pixels_for_agent(
@@ -139,12 +139,16 @@ def main(args):
         )
         print(f"[info] Added: {added} expert transitions")
 
+    sac_cfg = SACConfig()
+    sac_cfg.compile = bool(args.compile)
+
     agent = SAC(
         pix_dim=pix_shape,
         state_dim=st_shape[0],
         action_dim=act_dim,
         action_range=(MIN_ACT, MAX_ACT),
         device=device,
+        cfg=sac_cfg,
     )
 
     state_dict, _ = env.reset()
@@ -316,6 +320,11 @@ if __name__ == "__main__":
         type=str,
         default="lerobot/pusht_image",
         help="Hugging Face dataset ID for expert transitions",
+    )
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="Enable torch.compile for actor/critics (PyTorch 2.x, CUDA recommended)",
     )
     args = parser.parse_args()
 
